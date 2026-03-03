@@ -27,7 +27,7 @@ from .router import get_provider, cleanup_providers, record_success, record_fail
 from .base import LLMProvider, ProviderOverloaded, ProviderUnavailable
 from .health import router as health_router
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "get_provider",
