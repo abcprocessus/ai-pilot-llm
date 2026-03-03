@@ -15,6 +15,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]
+test = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-httpx>=0.30"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
