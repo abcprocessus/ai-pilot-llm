@@ -1,12 +1,23 @@
-"""LLM Router — выбор провайдера и circuit breaker.
+"""LLM Router — выбор провайдера, circuit breaker, гибридная маршрутизация.
 
 Логика выбора провайдера (приоритет по порядку):
   1. preferred — явно указанный провайдер (если доступен)
   2. requires_tools=True → фильтруем провайдеры без supports_tools()
   3. client_country в ANTHROPIC_RESTRICTED → Mistral (санкционная защита)
   4. LLM_PROVIDER env var → глобальный override
-  5. Claude (по умолчанию, если доступен и circuit не open)
-  6. Fallback chain: Mistral → OpenAI → Local
+  5. Гибридная маршрутизация (если включена):
+     - simple → Local (AI PILOT LLM, €0)
+     - medium → Mistral (€0.002/req)
+     - complex → Anthropic Claude (€0.01/req)
+  6. Claude (по умолчанию, если доступен и circuit не open)
+  7. Fallback chain: Mistral → OpenAI → Local
+
+Hybrid Routing (Этап 5):
+  HYBRID_ROUTING=true → включить гибридный роутер
+  Классификация сложности по эвристикам:
+    - simple: FAQ, приветствия, простые вопросы (<100 токенов)
+    - medium: бизнес-логика, анализ, средняя сложность
+    - complex: tool calling, юридика, длинный контекст (>2000 токенов), vision
 
 Circuit Breaker (per provider):
   FAILURE_THRESHOLD = 5 фейлов за FAILURE_WINDOW_SEC = 60 сек
@@ -18,11 +29,10 @@ HTTP 529 Overloaded (Anthropic):
   НЕ считается failure в circuit breaker.
   Немедленный fallback только для ТЕКУЩЕГО запроса.
   Следующий запрос снова попробует Claude.
-
-Этап 1 из 8: Multi-LLM абстракция.
 """
 import logging
 import os
+import re
 import time
 from collections import deque
 from typing import Optional
@@ -30,6 +40,86 @@ from typing import Optional
 from .base import LLMProvider, ProviderOverloaded
 
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────
+# Гибридная маршрутизация — классификатор сложности
+# ──────────────────────────────────────────────
+
+# Эвристические паттерны для определения сложности запроса
+_COMPLEX_PATTERNS = re.compile(
+    r"(?i)(договор|контракт|contract|NDA|GDPR|иск|суд|court|"
+    r"аудит|audit|проверка.*налог|tax.*review|"
+    r"ревью.*код|code.*review|refactor|debug|"
+    r"scan.?document|vision|pdf|image|"
+    r"анализ.*риск|risk.*analysis|"
+    r"план.*миграци|migration.*plan|"
+    r"составь.*документ|draft.*document|"
+    r"КУДИР|баланс|ликвидация|реорганизация)",
+)
+
+_SIMPLE_PATTERNS = re.compile(
+    r"(?i)^(привет|здравствуй|hi|hello|добрый|"
+    r"спасибо|thanks|thank you|пока|bye|"
+    r"как дела|what.s up|"
+    r"что (ты )?(умеешь|можешь)|what can you|"
+    r"помощь|help|/start|/help)",
+)
+
+
+def classify_complexity(
+    user_message: str,
+    system_prompt: str = "",
+    requires_tools: bool = False,
+    model_hint: str = "",
+) -> str:
+    """Классифицировать сложность запроса для гибридной маршрутизации.
+
+    Returns:
+        'simple' — FAQ, приветствия, короткие вопросы → Local
+        'medium' — бизнес-логика, средняя длина → Mistral
+        'complex' — юридика, vision, tools, длинный контекст → Claude
+    """
+    # Tool calling = всегда complex (Claude/Mistral only)
+    if requires_tools:
+        return "complex"
+
+    # Model hints: claude-opus → always complex, haiku → can be simple
+    if model_hint and "opus" in model_hint.lower():
+        return "complex"
+
+    msg_len = len(user_message)
+    total_len = msg_len + len(system_prompt)
+
+    # Very long context → complex
+    if total_len > 5000:
+        return "complex"
+
+    # Short greetings → simple
+    if msg_len < 100 and _SIMPLE_PATTERNS.search(user_message):
+        return "simple"
+
+    # Complex domain patterns
+    if _COMPLEX_PATTERNS.search(user_message) or _COMPLEX_PATTERNS.search(system_prompt):
+        return "complex"
+
+    # Medium-long → medium
+    if total_len > 1000:
+        return "medium"
+
+    # Short but not a greeting → medium (safer than simple)
+    if msg_len > 200:
+        return "medium"
+
+    # Default: simple for short messages
+    return "simple"
+
+
+# Mapping: complexity → preferred provider
+_HYBRID_MAP = {
+    "simple": "local",      # AI PILOT LLM (€0/req)
+    "medium": "mistral",    # Mistral (€0.002/req)
+    "complex": "anthropic", # Claude (€0.01/req)
+}
 
 # ──────────────────────────────────────────────
 # Страны с ограничениями Anthropic
@@ -66,6 +156,9 @@ def get_provider(
     agent_type: str | None = None,
     preferred: str | None = None,
     requires_tools: bool = False,
+    user_message: str = "",
+    system_prompt: str = "",
+    model: str = "",
 ) -> LLMProvider:
     """Выбрать LLM провайдер на основе контекста.
 
@@ -74,6 +167,9 @@ def get_provider(
         agent_type:      Тип агента (lisa, marina, boss, ...) — зарезервировано
         preferred:       Форсировать конкретный провайдер (anthropic|mistral|openai|local)
         requires_tools:  True если агент использует Tool Calling (Boss Bot, Router)
+        user_message:    Текст запроса пользователя (для гибридной маршрутизации)
+        system_prompt:   Системный промпт (для классификации сложности)
+        model:           Подсказка модели (claude-opus → complex)
 
     Returns:
         LLMProvider: Готовый к использованию singleton провайдера
@@ -118,11 +214,31 @@ def get_provider(
     if env_provider and env_provider in available and not _is_circuit_open(env_provider):
         return _get_or_create(env_provider)
 
-    # 5. Claude (основной провайдер)
+    # 5. Гибридная маршрутизация (HYBRID_ROUTING=true)
+    if os.getenv("HYBRID_ROUTING", "").lower() in ("true", "1", "yes"):
+        complexity = classify_complexity(
+            user_message=user_message,
+            system_prompt=system_prompt,
+            requires_tools=requires_tools,
+            model_hint=model,
+        )
+        hybrid_provider = _HYBRID_MAP.get(complexity, "anthropic")
+        if hybrid_provider in available and not _is_circuit_open(hybrid_provider):
+            logger.info(
+                f"Hybrid routing: complexity={complexity} → provider={hybrid_provider}"
+            )
+            return _get_or_create(hybrid_provider)
+        # Preferred hybrid provider unavailable → fall through to default chain
+        logger.warning(
+            f"Hybrid routing: {hybrid_provider} unavailable for "
+            f"complexity={complexity}, falling through"
+        )
+
+    # 6. Claude (основной провайдер)
     if "anthropic" in available and not _is_circuit_open("anthropic"):
         return _get_or_create("anthropic")
 
-    # 6. Fallback chain
+    # 7. Fallback chain
     for fallback in ["mistral", "openai", "local"]:
         if fallback in available and not _is_circuit_open(fallback):
             logger.warning(

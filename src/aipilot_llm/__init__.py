@@ -23,17 +23,21 @@
     openai    — GPT-4o/o3 (stub)
     local     — AI PILOT LLM self-hosted (stub)
 """
-from .router import get_provider, cleanup_providers, record_success, record_failure
+from .router import (
+    get_provider, cleanup_providers, record_success, record_failure,
+    classify_complexity,
+)
 from .base import LLMProvider, ProviderOverloaded, ProviderUnavailable
 from .health import router as health_router
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "get_provider",
     "cleanup_providers",
     "record_success",
     "record_failure",
+    "classify_complexity",
     "LLMProvider",
     "ProviderOverloaded",
     "ProviderUnavailable",
