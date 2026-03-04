@@ -2,9 +2,13 @@
   "A_constitutions": 304,
   "B_knowledge_base": 4125,
   "C_learning_log": 0,
-  "D_code_examples": 35,
-  "E_accounting": 35,
-  "total": 4499,
-  "train": 4049,
-  "val": 450
+  "D_code_examples": 52,
+  "E_accounting": 41,
+  "F_agent_dialogs": 273,
+  "G_general": 39,
+  "H_domain": 27,
+  "total": 4822,
+  "duplicates_removed": 39,
+  "train": 4339,
+  "val": 483
 }
