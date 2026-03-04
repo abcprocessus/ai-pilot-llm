@@ -1,18 +1,16 @@
 """Code Assistant endpoints — AI PILOT LLM как Copilot.
 
 Реализовано (Phase 2):
-  POST /api/v1/code/review    — ревью кода (баги, безопасность, стиль)
-  POST /api/v1/code/explain   — объяснение кода на русском
-  POST /api/v1/code/convert   — конвертация (1С:BSL ↔ Python, PHP ↔ TS и т.д.)
+  POST /api/v1/code/review    — ревью кода
+  POST /api/v1/code/explain   — объяснение кода
+  POST /api/v1/code/convert   — конвертация языков
 
-Stubs (Phase 7):
-  POST /api/v1/code/complete  — автокомплит (<1000ms)
+Реализовано (Phase 3):
+  POST /api/v1/code/complete  — автокомплит (claude-haiku, <1000ms)
   POST /api/v1/code/generate  — генерация по описанию
   POST /api/v1/code/refactor  — рефакторинг с объяснением
   POST /api/v1/code/debug     — анализ ошибки + фикс
   POST /api/v1/code/test      — генерация тестов
-
-Этап 7 из 8: Developer Portal + API Platform.
 """
 import json
 import logging
@@ -50,6 +48,42 @@ class CodeConvertRequest(BaseModel):
     source_language: str = Field(...)
     target_language: str = Field(...)
     preserve_comments: bool = Field(default=True)
+
+
+class CodeCompleteRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=50_000)
+    language: str = Field(default="python")
+    cursor_position: int = Field(...)
+    max_tokens: int = Field(default=200, le=500)
+
+
+class CodeGenerateRequest(BaseModel):
+    description: str = Field(..., min_length=5, max_length=5000)
+    language: str = Field(default="python")
+    framework: Optional[str] = Field(default=None)
+    style: str = Field(default="production")
+
+
+class CodeRefactorRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=50_000)
+    language: str = Field(default="python")
+    goals: list[str] = Field(default=["readability", "performance", "maintainability"])
+    constraints: Optional[str] = Field(default=None, max_length=2000)
+
+
+class CodeDebugRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=50_000)
+    language: str = Field(default="python")
+    error_message: Optional[str] = Field(default=None, max_length=5000)
+    expected_behavior: Optional[str] = Field(default=None, max_length=2000)
+    actual_behavior: Optional[str] = Field(default=None, max_length=2000)
+
+
+class CodeTestRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=50_000)
+    language: str = Field(default="python")
+    test_framework: str = Field(default="pytest")
+    coverage_focus: list[str] = Field(default=["happy_path", "edge_cases", "error_handling"])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -112,6 +146,69 @@ _CONVERT_SYSTEM = """Ты эксперт по конвертации кода AI
     "notes": ["важные замечания о конвертации"],
     "warnings": ["что невозможно конвертировать точно и почему"],
     "equivalencies": [{"source": "оригинал", "target": "эквивалент"}]
+}"""
+
+_COMPLETE_SYSTEM = """Ты Copilot AI PILOT. Дополни код в позиции курсора.
+Верни ТОЛЬКО дополнение (не весь код). Верни ТОЛЬКО JSON без markdown:
+{
+    "completion": "код-дополнение",
+    "confidence": 0.0-1.0,
+    "explanation": "почему это дополнение (1 предложение)"
+}"""
+
+_GENERATE_SYSTEM = """Ты генератор кода AI PILOT. Специализация: 1С, FastAPI, Next.js, WordPress.
+Генерируй production-ready код. Верни ТОЛЬКО JSON без markdown:
+{
+    "code": "полный код",
+    "language": "string",
+    "framework": "string | null",
+    "files": [{"path": "filename", "code": "..."}],
+    "dependencies": ["dep1"],
+    "explanation": "что делает код",
+    "usage_example": "как использовать"
+}"""
+
+_REFACTOR_SYSTEM = """Ты Senior Developer AI PILOT. Рефакторинг кода.
+Верни ТОЛЬКО JSON без markdown:
+{
+    "refactored_code": "улучшенный код",
+    "changes": [
+        {"type": "extract_function|rename|simplify|split|merge|reorder",
+         "description": "что изменено",
+         "before": "фрагмент до",
+         "after": "фрагмент после"}
+    ],
+    "metrics": {
+        "lines_before": 0,
+        "lines_after": 0,
+        "complexity_before": "high|medium|low",
+        "complexity_after": "high|medium|low"
+    }
+}"""
+
+_DEBUG_SYSTEM = """Ты опытный отладчик AI PILOT. Найди баг.
+Верни ТОЛЬКО JSON без markdown:
+{
+    "bug_found": true,
+    "root_cause": "описание корневой причины",
+    "bug_location": {"line": null, "code": "проблемный фрагмент"},
+    "fix": {
+        "code": "исправленный код",
+        "explanation": "что изменено"
+    },
+    "prevention": "как избежать в будущем",
+    "severity": "critical|high|medium|low"
+}"""
+
+_TEST_SYSTEM = """Ты QA Engineer AI PILOT. Пишешь тесты.
+Верни ТОЛЬКО JSON без markdown:
+{
+    "test_code": "полный код тестов",
+    "test_framework": "string",
+    "test_count": 0,
+    "coverage_areas": ["happy_path", "edge_cases"],
+    "test_descriptions": [{"name": "test_...", "description": "что проверяет"}],
+    "setup_required": "pip install ..."
 }"""
 
 
@@ -282,34 +379,113 @@ async def convert_code(req: CodeConvertRequest):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Stubs (Phase 7)
+# POST /api/v1/code/complete
 # ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/complete")
-async def complete_code(body: dict = None):
-    """Автокомплит — IDE integration. Target latency: <1000ms. STUB Phase 7."""
-    return {"status": "not_implemented", "message": "Code completion coming in Phase 7"}
+async def complete_code(req: CodeCompleteRequest):
+    """Автокомплит — IDE integration. claude-haiku, target <1000ms."""
+    before = req.code[:req.cursor_position]
+    after = req.code[req.cursor_position:]
+    user_msg = (
+        f"Язык: {req.language}\n"
+        f"Код ДО курсора:\n```{req.language}\n{before}\n```\n"
+        f"Код ПОСЛЕ курсора:\n```{req.language}\n{after}\n```\n"
+        f"Дополни код в позиции курсора."
+    )
+    result = await _call_llm(_COMPLETE_SYSTEM, user_msg, model="claude-haiku")
+    data = _parse_json_response(result["text"])
+    data["provider"] = result["provider"]
+    data["latency_ms"] = result["latency_ms"]
+    data["cost_eur"] = result["cost_eur"]
+    return data
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/v1/code/generate
+# ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/generate")
-async def generate_code(body: dict = None):
-    """Генерация кода по описанию. STUB Phase 7."""
-    return {"status": "not_implemented", "message": "Code generation coming in Phase 7"}
+async def generate_code(req: CodeGenerateRequest):
+    """Генерация кода по описанию. Специализация: 1С, FastAPI, Next.js, WP."""
+    framework_note = f"Framework: {req.framework}." if req.framework else ""
+    style_note = {
+        "production": "Пиши production-ready код с обработкой ошибок и типами.",
+        "prototype": "Пиши быстрый прототип, минимум boilerplate.",
+        "minimal": "Пиши минимальный код — только суть.",
+    }.get(req.style, "")
+    user_msg = (
+        f"Язык: {req.language}. {framework_note} {style_note}\n"
+        f"Задача: {req.description}"
+    )
+    result = await _call_llm(_GENERATE_SYSTEM, user_msg, model="claude-sonnet")
+    data = _parse_json_response(result["text"])
+    data["provider"] = result["provider"]
+    data["latency_ms"] = result["latency_ms"]
+    data["cost_eur"] = result["cost_eur"]
+    return data
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/v1/code/refactor
+# ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/refactor")
-async def refactor_code(body: dict = None):
-    """Рефакторинг с объяснением. STUB Phase 7."""
-    return {"status": "not_implemented", "message": "Code refactoring coming in Phase 7"}
+async def refactor_code(req: CodeRefactorRequest):
+    """Рефакторинг с пошаговым объяснением изменений."""
+    goals_str = ", ".join(req.goals)
+    constraints_note = f"Ограничения: {req.constraints}" if req.constraints else ""
+    user_msg = (
+        f"Рефакторинг {req.language} кода. Цели: {goals_str}. {constraints_note}\n"
+        f"```{req.language}\n{req.code}\n```"
+    )
+    result = await _call_llm(_REFACTOR_SYSTEM, user_msg, model="claude-sonnet")
+    data = _parse_json_response(result["text"])
+    data["provider"] = result["provider"]
+    data["latency_ms"] = result["latency_ms"]
+    data["cost_eur"] = result["cost_eur"]
+    return data
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/v1/code/debug
+# ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/debug")
-async def debug_code(body: dict = None):
-    """Анализ ошибки + предложение фикса. STUB Phase 7."""
-    return {"status": "not_implemented", "message": "Code debugging coming in Phase 7"}
+async def debug_code(req: CodeDebugRequest):
+    """Найти баг + предложить исправление."""
+    parts = [f"Язык: {req.language}\n```{req.language}\n{req.code}\n```"]
+    if req.error_message:
+        parts.append(f"Ошибка: {req.error_message}")
+    if req.expected_behavior:
+        parts.append(f"Ожидаемое поведение: {req.expected_behavior}")
+    if req.actual_behavior:
+        parts.append(f"Фактическое поведение: {req.actual_behavior}")
+    user_msg = "\n".join(parts)
+    result = await _call_llm(_DEBUG_SYSTEM, user_msg, model="claude-sonnet")
+    data = _parse_json_response(result["text"])
+    data["provider"] = result["provider"]
+    data["latency_ms"] = result["latency_ms"]
+    data["cost_eur"] = result["cost_eur"]
+    return data
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/v1/code/test
+# ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/test")
-async def generate_tests(body: dict = None):
-    """Генерация тестов для кода. STUB Phase 7."""
-    return {"status": "not_implemented", "message": "Test generation coming in Phase 7"}
+async def generate_tests(req: CodeTestRequest):
+    """Генерация тестов для существующего кода."""
+    focus_str = ", ".join(req.coverage_focus)
+    user_msg = (
+        f"Напиши тесты для {req.language} кода. "
+        f"Фреймворк: {req.test_framework}. Покрытие: {focus_str}.\n"
+        f"```{req.language}\n{req.code}\n```"
+    )
+    result = await _call_llm(_TEST_SYSTEM, user_msg, model="claude-sonnet")
+    data = _parse_json_response(result["text"])
+    data["provider"] = result["provider"]
+    data["latency_ms"] = result["latency_ms"]
+    data["cost_eur"] = result["cost_eur"]
+    return data

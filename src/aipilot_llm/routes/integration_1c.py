@@ -27,6 +27,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
+from pydantic import BaseModel, Field
 
 from aipilot_llm.router import get_provider
 
@@ -225,35 +226,135 @@ async def scan_document(
     return doc_data
 
 
-@router.post("/accounting-query")
-async def accounting_query(body: dict = None):
-    """Бухгалтерский запрос — проводки, счета, налоги.
+class AccountingQueryRequest(BaseModel):
+    query: str = Field(..., min_length=5, max_length=3000)
+    chart_of_accounts: str = Field(default="by")  # by | ru
+    context: Optional[str] = Field(default=None, max_length=5000)
+    operation_type: Optional[str] = Field(default=None)
 
-    STUB — реализация в Phase 7 через Iryna agent.
-    """
-    return {"status": "not_implemented", "message": "Accounting query coming in Phase 7"}
+
+class LegalCheckRequest(BaseModel):
+    document_text: str = Field(..., min_length=10, max_length=30_000)
+    document_type: str = Field(default="contract")
+    jurisdiction: str = Field(default="by")  # by | ru | eu
+    check_focus: list[str] = Field(default=["risks", "compliance", "missing_clauses"])
+
+
+_ACCOUNTING_SYSTEM = """Ты Ирина — AI бухгалтер AI PILOT.
+Специализация: бухгалтерский учёт Беларусь (план счетов 2012, Закон №57-З) и Россия (ПБУ, план счетов 2000).
+Отвечаешь точно, со ссылками на НПА. Верни ТОЛЬКО JSON без markdown:
+{
+    "answer": "ответ на вопрос",
+    "accounting_entries": [
+        {"debit": "60.01", "credit": "51", "amount": null, "description": "Оплата поставщику"}
+    ],
+    "legal_references": ["Постановление Минфина №13 от 29.06.2011"],
+    "tax_implications": "НДС 20%, вычет по входному НДС",
+    "warnings": ["Проверьте лимит расчётов наличными (100 БВ)"],
+    "confidence": 0.85
+}"""
+
+_LEGAL_SYSTEM = """Ты Леон — AI юрист AI PILOT.
+Специализация: договорное право Беларусь (ГК РБ), Россия (ГК РФ), ЕС (GDPR/CCPA).
+Анализируешь риски, нарушения, отсутствующие условия. Верни ТОЛЬКО JSON без markdown:
+{
+    "document_type": "string",
+    "jurisdiction": "by|ru|eu",
+    "risk_level": "high|medium|low",
+    "issues": [
+        {
+            "severity": "critical|high|medium|low",
+            "type": "missing_clause|ambiguous|non_compliant|unfavorable|risky",
+            "clause": "п. 5.2",
+            "issue": "описание проблемы",
+            "recommendation": "как исправить",
+            "legal_reference": "ГК РБ ст. 393"
+        }
+    ],
+    "missing_clauses": ["форс-мажор", "ответственность сторон"],
+    "compliance": {"gdpr": true, "local_law": true, "tax_compliance": true},
+    "summary": "общая оценка документа",
+    "confidence": 0.88
+}"""
+
+
+async def _llm_call(system: str, user: str, model: str = "claude-sonnet",
+                    preferred: str = "anthropic") -> dict:
+    """Вызов LLM с обработкой ошибок."""
+    try:
+        provider = get_provider(preferred=preferred)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"LLM unavailable: {e}")
+    try:
+        return await provider.chat(
+            system_prompt=system,
+            user_message=user,
+            model=model,
+            max_tokens=2048,
+        )
+    except Exception as e:
+        logger.error(f"1C LLM error: {e}")
+        raise HTTPException(status_code=502, detail=f"LLM error: {str(e)[:200]}")
+
+
+def _parse_json(raw: str) -> dict:
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1]).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"raw_response": raw, "error": "JSON parse failed"}
+
+
+@router.post("/accounting-query")
+async def accounting_query(req: AccountingQueryRequest):
+    """Бухгалтерский запрос — проводки, счета, налоги BY/RU (Ирина)."""
+    chart_name = "Беларусь (план счетов 2012)" if req.chart_of_accounts == "by" else "Россия (план счетов 2000)"
+    parts = [
+        f"План счетов: {req.chart_of_accounts.upper()} — {chart_name}",
+        f"Вопрос: {req.query}",
+    ]
+    if req.operation_type:
+        parts.append(f"Тип операции: {req.operation_type}")
+    if req.context:
+        parts.append(f"Контекст:\n{req.context}")
+
+    result = await _llm_call(_ACCOUNTING_SYSTEM, "\n".join(parts))
+    data = _parse_json(result["text"])
+    data["provider"] = result["provider"]
+    data["latency_ms"] = result["latency_ms"]
+    data["cost_eur"] = result["cost_eur"]
+    return data
 
 
 @router.post("/legal-check")
-async def legal_check(body: dict = None):
-    """Юридическая проверка документа.
+async def legal_check(req: LegalCheckRequest):
+    """Юридическая проверка документа BY/RU/EU (Леон)."""
+    focus_str = ", ".join(req.check_focus)
+    user_msg = (
+        f"Тип документа: {req.document_type}\n"
+        f"Юрисдикция: {req.jurisdiction.upper()}\n"
+        f"Фокус проверки: {focus_str}\n\n"
+        f"Текст документа:\n{req.document_text}"
+    )
+    result = await _llm_call(_LEGAL_SYSTEM, user_msg)
+    data = _parse_json(result["text"])
+    data["provider"] = result["provider"]
+    data["latency_ms"] = result["latency_ms"]
+    data["cost_eur"] = result["cost_eur"]
+    return data
 
-    STUB — реализация в Phase 7 через Leon agent.
-    """
-    return {"status": "not_implemented", "message": "Legal check coming in Phase 7"}
 
 
 @router.get("/health")
 async def health_1c():
-    """Health check для 1С BSL connectivity test.
-
-    1С разработчики вызывают при настройке .cfe расширения.
-    """
+    """Health check для 1С BSL connectivity test."""
     return {
         "status": "ok",
-        "version": "0.1.0",
-        "modules": ["scan-document"],
-        "pending": ["accounting-query", "legal-check"],
+        "version": "0.2.0",
+        "modules": ["scan-document", "accounting-query", "legal-check"],
         "file_types": list(_ALLOWED_MIME),
         "max_file_size_mb": _MAX_SIZE_MB,
     }
