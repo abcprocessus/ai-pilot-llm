@@ -32,3 +32,5 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+datasets/train.jsonl
+datasets/val.jsonl
