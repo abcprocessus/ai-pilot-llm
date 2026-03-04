@@ -145,6 +145,26 @@ def collect_constitutions(constitutions_dir: str) -> list[dict]:
 # Source B: Knowledge Base (Supabase)
 # ---------------------------------------------------------------------------
 
+def _fetch_paginated(url: str, headers: dict, page_size: int = 1000) -> list[dict]:
+    """Fetch all rows from Supabase REST API with pagination."""
+    import httpx
+    all_rows = []
+    offset = 0
+    while True:
+        sep = "&" if "?" in url else "?"
+        paged_url = f"{url}{sep}limit={page_size}&offset={offset}"
+        resp = httpx.get(paged_url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        rows = resp.json()
+        if not rows:
+            break
+        all_rows.extend(rows)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    return all_rows
+
+
 def collect_knowledge_base(supabase_url: str, supabase_key: str) -> list[dict]:
     """Source B: Fetch agent_knowledge_base from Supabase."""
     try:
@@ -159,7 +179,6 @@ def collect_knowledge_base(supabase_url: str, supabase_key: str) -> list[dict]:
         "?select=agent_type,tags,content,confidence_score"
         "&is_active=eq.true"
         "&order=confidence_score.desc"
-        "&limit=5000"
     )
     headers = {
         "apikey": supabase_key,
@@ -167,9 +186,7 @@ def collect_knowledge_base(supabase_url: str, supabase_key: str) -> list[dict]:
     }
 
     try:
-        resp = httpx.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        rows = resp.json()
+        rows = _fetch_paginated(url, headers)
     except Exception as e:
         print(f"  [B] WARNING: failed to fetch knowledge base: {e}")
         return entries
@@ -200,7 +217,10 @@ def collect_knowledge_base(supabase_url: str, supabase_key: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def collect_learning_log(supabase_url: str, supabase_key: str) -> list[dict]:
-    """Source C: Fetch high-quality interactions from agent_learning_log."""
+    """Source C: Fetch high-quality interactions from agent_learning_log.
+
+    Real columns: user_message_summary, agent_response_summary, response_quality (nullable int).
+    """
     try:
         import httpx
     except ImportError:
@@ -208,12 +228,13 @@ def collect_learning_log(supabase_url: str, supabase_key: str) -> list[dict]:
         return []
 
     entries = []
+    # response_quality is nullable — fetch rows where it's not null and >= 4
     url = (
         f"{supabase_url}/rest/v1/agent_learning_log"
-        "?select=agent_type,user_message,ai_response,response_quality"
+        "?select=agent_type,user_message_summary,agent_response_summary,response_quality"
+        "&response_quality=not.is.null"
         "&response_quality=gte.4"
         "&order=created_at.desc"
-        "&limit=5000"
     )
     headers = {
         "apikey": supabase_key,
@@ -221,16 +242,14 @@ def collect_learning_log(supabase_url: str, supabase_key: str) -> list[dict]:
     }
 
     try:
-        resp = httpx.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        rows = resp.json()
+        rows = _fetch_paginated(url, headers)
     except Exception as e:
         print(f"  [C] WARNING: failed to fetch learning log: {e}")
         return entries
 
     for row in rows:
-        user_msg = (row.get("user_message") or "").strip()
-        ai_resp = (row.get("ai_response") or "").strip()
+        user_msg = (row.get("user_message_summary") or "").strip()
+        ai_resp = (row.get("agent_response_summary") or "").strip()
         if not user_msg or not ai_resp or len(ai_resp) < 30:
             continue
 

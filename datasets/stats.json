@@ -1,10 +1,10 @@
 {
   "A_constitutions": 304,
-  "B_knowledge_base": 0,
+  "B_knowledge_base": 4125,
   "C_learning_log": 0,
   "D_code_examples": 35,
   "E_accounting": 35,
-  "total": 374,
-  "train": 336,
-  "val": 38
+  "total": 4499,
+  "train": 4049,
+  "val": 450
 }
