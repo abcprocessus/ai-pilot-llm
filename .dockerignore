@@ -1,0 +1,23 @@
+# Datasets are mounted as volumes, not COPY'd
+datasets/
+checkpoints/
+eval/
+
+# Dev/IDE
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Docs
+docs/
+reviews/
+*.md
+!README.md
+
+# Antigravity workspace
+antigravity-output/
+training/

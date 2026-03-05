@@ -1,0 +1,64 @@
+# AI PILOT LLM — Inference Server (vLLM)
+# GPU: RTX 4090 / A100 / L40S recommended
+#
+# Build:
+#   docker build -f Dockerfile.serve -t aipilot-llm-serve .
+#
+# Run (merged model):
+#   docker run --gpus all -p 8000:8000 \
+#     -v $(pwd)/checkpoints/ai-pilot-llm-v1-merged:/model \
+#     aipilot-llm-serve
+#
+# Run with LoRA adapter:
+#   docker run --gpus all -p 8000:8000 \
+#     -e BASE_MODEL=unsloth/Qwen3-8B \
+#     -e LORA_PATH=/lora \
+#     -v $(pwd)/checkpoints/ai-pilot-llm-v1:/lora \
+#     aipilot-llm-serve
+#
+# Test:
+#   curl http://localhost:8000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"ai-pilot-llm-1.0","messages":[{"role":"user","content":"Привет!"}]}'
+
+FROM vllm/vllm-openai:latest
+
+ENV PYTHONUNBUFFERED=1
+
+# Default: serve merged model from /model
+ENV MODEL_PATH=/model
+ENV BASE_MODEL=""
+ENV LORA_PATH=""
+ENV GPU_MEMORY_UTILIZATION=0.90
+ENV MAX_MODEL_LEN=4096
+ENV HOST=0.0.0.0
+ENV PORT=8000
+
+# Copy serve script for advanced usage
+COPY scripts/serve.py /app/serve.py
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -sf http://localhost:${PORT}/health || exit 1
+
+EXPOSE ${PORT}
+
+# Entrypoint: use vLLM directly or our wrapper
+CMD if [ -n "$LORA_PATH" ] && [ -n "$BASE_MODEL" ]; then \
+      python -m vllm.entrypoints.openai.api_server \
+        --model "$BASE_MODEL" \
+        --enable-lora \
+        --lora-modules ai-pilot-llm-1.0="$LORA_PATH" \
+        --host "$HOST" \
+        --port "$PORT" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --max-model-len "$MAX_MODEL_LEN"; \
+    else \
+      python -m vllm.entrypoints.openai.api_server \
+        --model "$MODEL_PATH" \
+        --served-model-name ai-pilot-llm-1.0 \
+        --host "$HOST" \
+        --port "$PORT" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --max-model-len "$MAX_MODEL_LEN"; \
+    fi

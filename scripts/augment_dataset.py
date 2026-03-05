@@ -137,7 +137,7 @@ async def generate_variations(
 
     body = {
         "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 2000,
+        "max_tokens": 4096,
         "messages": [{"role": "user", "content": prompt}],
     }
 
@@ -272,19 +272,16 @@ async def main():
                 if q and a and len(a) > 30:
                     entries.append(make_entry(system, q, a))
 
+            all_entries.extend(entries)
             processed += 1
             if processed % 50 == 0:
                 print(f"    Processed: {processed}/{len(samples)} ({len(all_entries)} pairs so far)")
 
             # Small delay to avoid rate limits
             await asyncio.sleep(0.2)
-            return entries
 
     tasks = [process_one(s) for s in samples]
-    results = await asyncio.gather(*tasks)
-
-    for result in results:
-        all_entries.extend(result)
+    await asyncio.gather(*tasks)
 
     print(f"\n  Generated: {len(all_entries)} pairs from {len(samples)} entries ({errors} errors)")
 
